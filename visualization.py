@@ -51,7 +51,6 @@ def plot_errors(error_history, min_dist_history, title, safe_dist):
     plt.show()
 
 def animate_simulation(robots, goal, obstacle, title, formation_offsets, dt, k_goal, k_form, k_avoid, k_obs, danger_dist):
-    """Упрощённая анимация без повтора симуляции"""
     fig, ax = plt.subplots(figsize=(10, 8))
     ax.set_xlim(-2, FIELD_SIZE+2)
     ax.set_ylim(-2, FIELD_SIZE+2)

@@ -1,0 +1,232 @@
+import numpy as np
+import matplotlib.pyplot as plt
+from matplotlib.patches import Circle
+from matplotlib.animation import FuncAnimation
+import imageio
+
+from config import GOAL, DT, K_FORM, K_AVOID, K_OBS, DANGER_DIST, ROBOT_COLORS
+from controller import to_goal, to_formation, avoid_neighbors, avoid_obstacle, resolve_collision
+from formation import get_formation_targets, get_formation_offsets
+
+
+class RealtimeSimulation:
+    def __init__(self, robots, goal, obstacles, initial_formation, num_robots):
+        self.robots = robots
+        self.goal = goal
+
+        self.obstacles = (
+            [] if obstacles is None
+            else (obstacles if isinstance(obstacles, list) else [obstacles])
+        )
+
+        self.num_robots = num_robots
+        self.current_formation = initial_formation
+
+        # физика фиксирована
+        self.dt = DT
+
+        # UI скорость
+        self.speed = 1.0
+
+        # формация
+        self.SOFT_START_STEPS = 200
+        self.K_FORM_FULL = K_FORM
+        self.K_FORM_SOFT = K_FORM * 0.5
+
+        self.step = 0
+        self.max_steps = 3000
+
+        # метрики
+        self.error_history = []
+        self.min_dist_history = []
+
+        # запись GIF
+        self.frames = []
+        self.MAX_FRAMES = 300
+        self.FRAME_SKIP = 10
+
+        # графика
+        self._setup_graphics()
+        self.fig.canvas.mpl_connect('key_press_event', self.on_key)
+
+        self.animation = None
+
+    # ---------------- GRAPHICS ----------------
+    def _setup_graphics(self):
+        self.fig, self.ax = plt.subplots(figsize=(10, 8))
+
+        self.ax.set_xlim(-2, 22)
+        self.ax.set_ylim(-2, 22)
+        self.ax.grid(True, alpha=0.3)
+
+        self.ax.set_title(f"Формация: {self.current_formation}")
+
+        self.points = [
+            self.ax.plot([], [], 'o', color=ROBOT_COLORS[i], markersize=10)[0]
+            for i in range(self.num_robots)
+        ]
+
+        self.trajectories = [[] for _ in range(self.num_robots)]
+        self.traj_lines = [
+            self.ax.plot([], [], color=ROBOT_COLORS[i], linewidth=1)[0]
+            for i in range(self.num_robots)
+        ]
+
+        self.ax.scatter(self.goal[0], self.goal[1], color='red', marker='*', s=200)
+
+        for obs in self.obstacles:
+            self.ax.add_patch(Circle(obs.pos, obs.radius, color='gray', alpha=0.5))
+
+    # ---------------- CONTROL ----------------
+    def _update_interval(self):
+        if self.animation:
+            self.animation.event_source.interval = max(5, int(20 / self.speed))
+
+    def on_key(self, event):
+        if event.key == '1':
+            self.current_formation = 'line'
+        elif event.key == '2':
+            self.current_formation = 'rhombus'
+        elif event.key == '3':
+            self.current_formation = 'circle'
+
+        elif event.key in ['+', 'plus', 'equal', 'kp_add']:
+            self.speed = min(self.speed + 0.2, 3.0)
+            self.sim_speed = min(self.speed, 2.0)
+            self._update_interval()
+            print(f"Скорость: {self.speed:.1f}x")
+
+        elif event.key in ['-', 'minus', 'kp_subtract']:
+            self.speed = max(self.speed - 0.2, 0.2)
+            self.sim_speed = min(self.speed, 2.0)
+            self._update_interval()
+            print(f"Скорость: {self.speed:.1f}x")
+    
+    # ---------------- SIMULATION ----------------
+    def _get_k_form(self):
+        return self.K_FORM_SOFT if self.step < self.SOFT_START_STEPS else self.K_FORM_FULL
+
+    def _compute_forces(self, targets, k_form):
+        forces = []
+
+        for i, robot in enumerate(self.robots):
+            force = np.zeros(2)
+
+            if robot.is_leader:
+                force += to_goal(robot, self.goal)
+            else:
+                force += to_formation(robot, targets[i], k_form)
+
+            force += avoid_neighbors(robot, self.robots, K_AVOID)
+
+            for obs in self.obstacles:
+                force += avoid_obstacle(robot, obs, K_OBS, DANGER_DIST)
+
+            forces.append(force)
+
+        return forces
+
+    def _apply_forces(self, forces):
+        for robot, force in zip(self.robots, forces):
+            robot.update(force, self.dt * self.speed)
+
+    def _resolve_collisions(self):
+        for robot in self.robots:
+            for obs in self.obstacles:
+                resolve_collision(robot, obs)
+
+    def _update_display(self):
+        for i, robot in enumerate(self.robots):
+            self.points[i].set_data([robot.pos[0]], [robot.pos[1]])
+
+            self.trajectories[i].append(robot.pos.copy())
+            traj = np.array(self.trajectories[i])
+
+            self.traj_lines[i].set_data(traj[:, 0], traj[:, 1])
+
+    def _update_metrics(self, targets):
+        errors = [
+            np.linalg.norm(robot.pos - targets[i])
+            for i, robot in enumerate(self.robots)
+            if not robot.is_leader and i < len(targets)
+        ]
+        self.error_history.append(np.mean(errors) if errors else 0.0)
+
+        dists = []
+        for i in range(len(self.robots)):
+            for j in range(i + 1, len(self.robots)):
+                dists.append(np.linalg.norm(self.robots[i].pos - self.robots[j].pos))
+
+        self.min_dist_history.append(min(dists) if dists else 0.0)
+
+    def _check_goal(self, leader):
+        if np.linalg.norm(leader.pos - self.goal) < 0.5:
+            if self.animation:
+                self.animation.event_source.stop()
+            return True
+        return False
+
+    # ---------------- FRAME CAPTURE ----------------
+    def _capture_frame(self):
+        if self.step % self.FRAME_SKIP != 0:
+            return
+        if len(self.frames) >= self.MAX_FRAMES:
+            return
+
+        self.fig.canvas.draw()
+
+        buf = np.frombuffer(
+            self.fig.canvas.buffer_rgba(),
+            dtype=np.uint8
+        ).copy()
+
+        frame = buf.reshape(self.fig.canvas.get_width_height()[::-1] + (4,))
+        self.frames.append(frame[:, :, :3])
+
+    # ---------------- UPDATE ----------------
+    def update(self, frame):
+        if self.step >= self.max_steps:
+            if self.animation:
+                self.animation.event_source.stop()
+            return self.points + self.traj_lines
+
+        k_form = self._get_k_form()
+        offsets = get_formation_offsets(self.num_robots, self.current_formation)
+
+        leader = self.robots[0]
+        leader_vel = leader.pos - leader.trajectory[-2] if len(leader.trajectory) > 1 else np.zeros(2)
+
+        targets = get_formation_targets(leader.pos, leader_vel, offsets, self.goal)
+
+        forces = self._compute_forces(targets, k_form)
+        self._apply_forces(forces)
+        self._resolve_collisions()
+        self._update_display()
+        self._update_metrics(targets)
+
+        self._capture_frame()
+
+        self.step += 1
+        self._check_goal(leader)
+
+        return self.points + self.traj_lines
+
+    # ---------------- RUN ----------------
+    def run(self):
+        self.animation = FuncAnimation(
+            self.fig,
+            self.update,
+            interval=20,
+            blit=False
+        )
+
+        plt.show()
+
+        if self.frames:
+            save = input("\nСохранить GIF? (y/n): ")
+            if save.lower() == 'y':
+                name = input("Имя файла: ") or "animation"
+                imageio.mimsave(f"{name}.gif", self.frames, fps=30)
+                print(f"Сохранено: {name}.gif")
+
+        return self.error_history, self.min_dist_history
