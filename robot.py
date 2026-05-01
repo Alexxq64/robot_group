@@ -3,7 +3,7 @@ import numpy as np
 class Robot:
     def __init__(self, x, y, is_leader=False):
         self.pos = np.array([x, y], dtype=float)
-        self.vel = np.array([0.0, 0.0])  # добавить
+        self.vel = np.array([0.0, 0.0]) 
         self.is_leader = is_leader
         self.trajectory = [self.pos.copy()]
     

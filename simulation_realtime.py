@@ -2,6 +2,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.patches import Circle, Rectangle
 from matplotlib.animation import FuncAnimation
+import matplotlib.image as mpimg
+from matplotlib.offsetbox import OffsetImage, AnnotationBbox
 import imageio
 
 from config import GOAL, DT, K_FORM, K_AVOID, K_OBS, DANGER_DIST, ROBOT_COLORS
@@ -60,31 +62,42 @@ class RealtimeSimulation:
         self.ax.grid(True, alpha=0.3)
         self.ax.set_title(f"Формация: {self.current_formation} | 1/2/3 | +/- скорость")
 
-        # Прямоугольники (роботы)
-        self.robot_shapes = []
-        self.robot_width = 0.6
-        self.robot_height = 0.4
-        for i in range(self.num_robots):
-            rect = Rectangle(
-                (0, 0), self.robot_width, self.robot_height,
-                angle=0, color=ROBOT_COLORS[i], alpha=0.8
-            )
-            self.ax.add_patch(rect)
-            self.robot_shapes.append(rect)
+        # Флаг
+        img = mpimg.imread("Finish.jpeg")
+        imagebox = OffsetImage(img, zoom=0.036)
+        ab = AnnotationBbox(imagebox, (self.goal[0], self.goal[1]), frameon=False, zorder=0)
+        self.ax.add_artist(ab)
+        self.ax.text(self.goal[0] + 0.6, self.goal[1] + 0.3, "Финиш", fontsize=10, color="red", zorder=1)
+
+        # Препятствия
+        for obs in self.obstacles:
+            self.ax.add_patch(Circle(obs.pos, obs.radius, color='gray', alpha=0.5, zorder=2))
 
         # Траектории
         self.trajectories = [[] for _ in range(self.num_robots)]
         self.traj_lines = [
-            self.ax.plot([], [], color=ROBOT_COLORS[i], linewidth=1)[0]
+            self.ax.plot([], [], color=ROBOT_COLORS[i], linewidth=1, zorder=3)[0]
             for i in range(self.num_robots)
         ]
 
-        # Цель
-        self.ax.scatter(self.goal[0], self.goal[1], color='red', marker='*', s=200)
+        # Роботы
+        self.robot_shapes = []
+        self.robot_width = 0.6
+        self.robot_height = 0.4
 
-        # Препятствия
-        for obs in self.obstacles:
-            self.ax.add_patch(Circle(obs.pos, obs.radius, color='gray', alpha=0.5))
+        for i in range(self.num_robots):
+            if i == 0:
+                # лидер — звезда
+                star, = self.ax.plot([], [], '*', color=ROBOT_COLORS[i], markersize=12, zorder=5)
+                self.robot_shapes.append(star)
+            else:
+                # ведомые — прямоугольники
+                rect = Rectangle(
+                    (0, 0), self.robot_width, self.robot_height,
+                    angle=0, color=ROBOT_COLORS[i], alpha=0.8, zorder=5
+                )
+                self.ax.add_patch(rect)
+                self.robot_shapes.append(rect)
 
     # ---------------- CONTROL ----------------
     def _update_interval(self):
@@ -142,37 +155,41 @@ class RealtimeSimulation:
                 resolve_collision(robot, obs)
 
     def _update_display(self):
+        # Обновление роботов
         for i, robot in enumerate(self.robots):
-            # Угол из скорости
-            if len(robot.trajectory) > 1:
-                vx = robot.pos[0] - robot.trajectory[-2][0]
-                vy = robot.pos[1] - robot.trajectory[-2][1]
-                if abs(vx) > 0.001 or abs(vy) > 0.001:
-                    angle = np.degrees(np.arctan2(vy, vx))
+            if i == 0:
+                # лидер — звезда
+                self.robot_shapes[i].set_data([robot.pos[0]], [robot.pos[1]])
+            else:
+                # прямоугольники с ориентацией
+                if len(robot.trajectory) > 1:
+                    vx = robot.pos[0] - robot.trajectory[-2][0]
+                    vy = robot.pos[1] - robot.trajectory[-2][1]
+                    if abs(vx) > 0.001 or abs(vy) > 0.001:
+                        angle = np.degrees(np.arctan2(vy, vx))
+                    else:
+                        angle = 0.0
                 else:
                     angle = 0.0
-            else:
-                angle = 0.0
 
-            # Вычисление позиции так, чтобы центр был в robot.pos
-            w = self.robot_width
-            h = self.robot_height
-            cx = robot.pos[0]
-            cy = robot.pos[1]
-            angle_rad = np.radians(angle)
-            
-            x = cx - (w/2)*np.cos(angle_rad) + (h/2)*np.sin(angle_rad)
-            y = cy - (w/2)*np.sin(angle_rad) - (h/2)*np.cos(angle_rad)
-            
-            self.robot_shapes[i].set_xy((x, y))
-            self.robot_shapes[i].angle = angle
+                w = self.robot_width
+                h = self.robot_height
+                cx = robot.pos[0]
+                cy = robot.pos[1]
+                angle_rad = np.radians(angle)
+
+                x = cx - (w/2) * np.cos(angle_rad) + (h/2) * np.sin(angle_rad)
+                y = cy - (w/2) * np.sin(angle_rad) - (h/2) * np.cos(angle_rad)
+
+                self.robot_shapes[i].set_xy((x, y))
+                self.robot_shapes[i].angle = angle
 
         # Траектории
         for i, robot in enumerate(self.robots):
             self.trajectories[i].append(robot.pos.copy())
             traj = np.array(self.trajectories[i])
             self.traj_lines[i].set_data(traj[:, 0], traj[:, 1])
-            
+
     def _update_metrics(self, targets):
         errors = [
             np.linalg.norm(robot.pos - targets[i])
@@ -190,6 +207,7 @@ class RealtimeSimulation:
 
     def _check_goal(self, leader):
         if np.linalg.norm(leader.pos - self.goal) < 0.5:
+            print(f"Цель достигнута на шаге {self.step}")
             if self.animation:
                 self.animation.event_source.stop()
             return True
